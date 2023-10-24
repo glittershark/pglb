@@ -2,7 +2,8 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::{Arc, Barrier};
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::measurement::WallTime;
+use criterion::{criterion_group, criterion_main, Bencher, BenchmarkGroup, Criterion};
 use postgres::{Client, NoTls};
 
 mod tokio {
@@ -185,103 +186,91 @@ fn setup_fixture_data() {
     eprintln!("Done.")
 }
 
-fn benchmark_tcp_proxies(c: &mut Criterion) {
-    setup_fixture_data();
-
+fn benchmark_one_client(query: &str, mut group: BenchmarkGroup<WallTime>) {
     let mut port = 8887u16;
     let mut next_port = || {
         port += 1;
         port
     };
 
+    let do_bench = |b: &mut Bencher, port| {
+        let mut client = loop {
+            if let Ok(c) = Client::connect(
+                &format!("postgresql://postgres:noria@127.0.0.1:{port}/noria"),
+                NoTls,
+            ) {
+                break c;
+            }
+        };
+        b.iter(|| {
+            client.simple_query(query).unwrap();
+        });
+    };
+
+    group.bench_function("no proxy (control)", |b| {
+        do_bench(b, 5432);
+    });
+
+    group.bench_function("tokio proxy", |b| {
+        let port = next_port();
+        let rt = ::tokio::runtime::Runtime::new().unwrap();
+        let _proxy = rt
+            .block_on(tokio::proxy(
+                SocketAddr::new("0.0.0.0".parse().unwrap(), port),
+                "127.0.0.1:5432".parse().unwrap(),
+            ))
+            .unwrap();
+
+        do_bench(b, port);
+    });
+
+    group.bench_function("tokio_uring proxy", |b| {
+        let port = next_port();
+        let started = Arc::new(Barrier::new(2));
+        std::thread::spawn({
+            let started = started.clone();
+            move || {
+                let rt = ::tokio_uring::Runtime::new(::tokio_uring::builder().entries(64)).unwrap();
+                let proxy = rt
+                    .block_on(tokio_uring::proxy(
+                        SocketAddr::new("0.0.0.0".parse().unwrap(), port),
+                        "127.0.0.1:5432".parse().unwrap(),
+                    ))
+                    .unwrap();
+                started.wait();
+                let _ = rt.block_on(proxy);
+            }
+        });
+
+        started.wait();
+
+        do_bench(b, port);
+    });
+
+    group.bench_function("glommio proxy", |b| {
+        let port = next_port();
+        let _proxy = ::glommio::LocalExecutorBuilder::default()
+            .spawn(move || {
+                glommio::proxy(
+                    SocketAddr::new("0.0.0.0".parse().unwrap(), port),
+                    "127.0.0.1:5432".parse().unwrap(),
+                )
+            })
+            .unwrap();
+
+        do_bench(b, port);
+    });
+}
+
+fn benchmark_tcp_proxies(c: &mut Criterion) {
+    setup_fixture_data();
+
     for (query, label) in [
         ("SELECT 1", "one value"),
         ("SELECT x FROM benchmark_fixture_data", "many values"),
     ] {
-        let mut group = c.benchmark_group(format!("proxy to postgres/{}", label));
-
-        group.bench_function("no proxy (control)", |b| {
-            let mut client =
-                Client::connect("postgresql://postgres:noria@127.0.0.1/noria", NoTls).unwrap();
-            b.iter(|| {
-                client.simple_query(query).unwrap();
-            });
-        });
-
-        group.bench_function("tokio proxy", |b| {
-            let port = next_port();
-            let rt = ::tokio::runtime::Runtime::new().unwrap();
-            let _proxy = rt
-                .block_on(tokio::proxy(
-                    SocketAddr::new("0.0.0.0".parse().unwrap(), port),
-                    "127.0.0.1:5432".parse().unwrap(),
-                ))
-                .unwrap();
-
-            let mut client = Client::connect(
-                &format!("postgresql://postgres:noria@127.0.0.1:{port}/noria"),
-                NoTls,
-            )
-            .unwrap();
-            b.iter(|| {
-                client.simple_query(query).unwrap();
-            });
-        });
-
-        group.bench_function("tokio_uring proxy", |b| {
-            let port = next_port();
-            let started = Arc::new(Barrier::new(2));
-            std::thread::spawn({
-                let started = started.clone();
-                move || {
-                    let rt =
-                        ::tokio_uring::Runtime::new(::tokio_uring::builder().entries(64)).unwrap();
-                    let proxy = rt
-                        .block_on(tokio_uring::proxy(
-                            SocketAddr::new("0.0.0.0".parse().unwrap(), port),
-                            "127.0.0.1:5432".parse().unwrap(),
-                        ))
-                        .unwrap();
-                    started.wait();
-                    let _ = rt.block_on(proxy);
-                }
-            });
-
-            started.wait();
-
-            let mut client = Client::connect(
-                &format!("postgresql://postgres:noria@127.0.0.1:{port}/noria"),
-                NoTls,
-            )
-            .unwrap();
-            b.iter(|| {
-                client.simple_query(query).unwrap();
-            });
-        });
-
-        group.bench_function("glommio proxy", |b| {
-            let port = next_port();
-            let _proxy = ::glommio::LocalExecutorBuilder::default()
-                .spawn(move || {
-                    glommio::proxy(
-                        SocketAddr::new("0.0.0.0".parse().unwrap(), port),
-                        "127.0.0.1:5432".parse().unwrap(),
-                    )
-                })
-                .unwrap();
-
-            let mut client = loop {
-                if let Ok(c) = Client::connect(
-                    &format!("postgresql://postgres:noria@127.0.0.1:{port}/noria"),
-                    NoTls,
-                ) {
-                    break c;
-                }
-            };
-            b.iter(|| {
-                client.simple_query(query).unwrap();
-            });
-        });
+        let group = c.benchmark_group(format!("proxy to postgres/one client/{}", label));
+        benchmark_one_client(query, group);
     }
 }
 
