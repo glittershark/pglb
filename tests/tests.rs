@@ -1,10 +1,8 @@
-use std::{
-    env,
-    net::TcpStream,
-    sync::atomic::{AtomicU16, Ordering},
-    thread::JoinHandle,
-    time::{Duration, Instant},
-};
+use std::env;
+use std::net::TcpStream;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use postgres::{Client, NoTls};
