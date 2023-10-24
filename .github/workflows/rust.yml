@@ -35,3 +35,28 @@ jobs:
         with:
           command: fmt
           args: --all -- --check
+
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Run tests
+      run: cargo test
+      env:
+        PGHOST: postgres
+        PGPORT: 5432
+        PGUSER: postgres
+        PGPASSWORD: password
+    services:
+      postgres:
+        image: postgres:16
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_PASSWORD: password
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
