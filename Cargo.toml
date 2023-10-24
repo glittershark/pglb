@@ -1,0 +1,21 @@
+[package]
+name = "pglb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glommio = "0.8.0"
+io-uring = "0.6.2"
+
+[dev-dependencies]
+futures = "0.3"
+tokio = { version = "1.33", features = ["full"] }
+tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring" }
+postgres = "0.19.7"
+criterion = "0.5.1"
+slab = "0.4.9"
+libc = "0.2.149"
+
+[[bench]]
+name = "tcp_proxy"
+harness = false
