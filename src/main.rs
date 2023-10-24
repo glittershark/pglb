@@ -5,8 +5,8 @@ use clap::Parser;
 use color_eyre::eyre::Result;
 use futures::future::{try_select, Either};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, trace, trace_span, Instrument};
+use tokio::net::{self, TcpListener, TcpStream};
+use tracing::{debug, error, info, trace, trace_span, Instrument};
 
 /// a better, faster postgres connection pool
 #[derive(Parser)]
@@ -17,7 +17,7 @@ pub struct Options {
 
     /// TCP address (host:port) of upstream PostgreSQL server(s) to connect to
     #[clap(long, short = 'u', required = true)]
-    pub upstream: Vec<SocketAddr>,
+    pub upstream: Vec<String>,
 }
 
 struct Upstream {
@@ -73,7 +73,14 @@ async fn handle_client(mut downstream: TcpStream, upstream: &'static Upstream) -
 pub async fn run(opts: Options) -> Result<()> {
     let Options { bind, upstream } = opts;
 
-    let upstream = Upstream::new(upstream);
+    let mut upstream_addrs = Vec::with_capacity(upstream.len());
+    for host in upstream {
+        for addr in net::lookup_host(host).await? {
+            debug!(%addr, "Resolved upstream addr");
+            upstream_addrs.push(addr);
+        }
+    }
+    let upstream = Upstream::new(upstream_addrs);
 
     let listener = TcpListener::bind(bind).await?;
     info!(%bind);
