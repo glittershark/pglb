@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
+    - uses: Swatinem/rust-cache@v2
     - name: Check clippy
       run: cargo clippy -- -D warnings
 
@@ -30,6 +31,7 @@ jobs:
           toolchain: nightly-2023-10-24
           override: true
           components: rustfmt
+      - uses: Swatinem/rust-cache@v2
       - name: Check formatting
         uses: actions-rs/cargo@v1
         with:
@@ -41,6 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
+    - uses: Swatinem/rust-cache@v2
     - name: Run tests
       run: cargo test
       env:
