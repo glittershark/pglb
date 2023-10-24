@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use clap::Parser;
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Context, Result};
 use futures::future::{try_select, Either};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{self, TcpListener, TcpStream};
@@ -75,7 +75,10 @@ pub async fn run(opts: Options) -> Result<()> {
 
     let mut upstream_addrs = Vec::with_capacity(upstream.len());
     for host in upstream {
-        for addr in net::lookup_host(host).await? {
+        for addr in net::lookup_host(&host)
+            .await
+            .wrap_err_with(|| format!("Failed to lookup host for upstream address {host}"))?
+        {
             debug!(%addr, "Resolved upstream addr");
             upstream_addrs.push(addr);
         }
