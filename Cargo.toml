@@ -11,6 +11,8 @@ futures = "0.3"
 tracing = { version = "0.1", features = ["release_max_level_debug"] }
 tracing-subscriber = { version = "0.3.17", features = ["env-filter", "json"] }
 thiserror = "1.0.50"
+num-traits = "0.2.17"
+num-derive = "0.4.1"
 
 [dev-dependencies]
 assert_cmd = { version = "2.0.12", features = ["color", "color-auto"] }

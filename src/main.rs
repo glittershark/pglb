@@ -10,6 +10,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{self, TcpListener, TcpStream};
 use tracing::{debug, error, info, trace, trace_span, Instrument};
 
+mod message;
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum LogFormat {
     /// Corresponds to [`tracing_subscriber::fmt::format::Compact`]
