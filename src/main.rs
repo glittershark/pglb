@@ -1,14 +1,20 @@
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::message::FrontendMessageType;
 use clap::{Parser, ValueEnum};
 use color_eyre::eyre::{Context, Result};
 use futures::future::{try_select, Either};
+use message::BackendMessageType;
+use num_traits::FromPrimitive;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{self, TcpListener, TcpStream};
 use tracing::{debug, error, info, trace, trace_span, Instrument};
+use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
+use tracing_subscriber::Layer;
 
 mod message;
 
@@ -95,11 +101,139 @@ impl Upstream {
 
 const BUFFER_SIZE: usize = 16 * 1024;
 
+#[derive(Debug)]
+struct Packet<'a> {
+    msg_type: u8,
+    contents: Vec<Cow<'a, [u8]>>,
+}
+
+impl<'a> Packet<'a> {
+    fn into_owned(self) -> Packet<'static> {
+        Packet {
+            msg_type: self.msg_type,
+            contents: self
+                .contents
+                .into_iter()
+                .map(|b| Cow::Owned(b.into_owned()))
+                .collect(),
+        }
+    }
+
+    fn frontend_message_type(&self) -> FrontendMessageType {
+        FrontendMessageType::from_u8(self.msg_type)
+            .unwrap_or_else(|| panic!("Unknown frontend message type {}", self.msg_type))
+    }
+
+    fn backend_message_type(&self) -> BackendMessageType {
+        BackendMessageType::from_u8(self.msg_type)
+            .unwrap_or_else(|| panic!("Unknown backend message type {}", self.msg_type))
+    }
+
+    fn append(&mut self, buf: &[u8]) {
+        match self.contents.last_mut() {
+            Some(contents) => contents.to_mut().extend_from_slice(buf),
+            None => todo!(),
+        }
+    }
+}
+
+struct Packets<'sniffer, 'buf> {
+    sniffer: &'sniffer mut MessageSniffer,
+    buf: &'buf [u8],
+}
+
+impl<'sniffer, 'buf> Iterator for Packets<'sniffer, 'buf> {
+    type Item = Packet<'buf>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.buf.is_empty() {
+            return None;
+        }
+
+        let msg_type = if self.sniffer.next_msg == u64::MAX {
+            FrontendMessageType::Startup as u8
+        } else if let Some(msg_type) = self.buf.get(self.sniffer.next_msg as usize) {
+            self.buf = &self.buf[(self.sniffer.next_msg as usize + 1)..];
+            *msg_type
+        } else {
+            self.sniffer.next_msg -= self.buf.len() as u64;
+            match &mut self.sniffer.unfinished_packet {
+                Some(packet) => {
+                    packet.append(self.buf);
+                }
+                p @ None => todo!(),
+            }
+            return None;
+        };
+
+        if self.buf.len() < 4 {
+            tracing::warn!(
+                msg_type,
+                backend_msg = ?BackendMessageType::from_u8(msg_type),
+                frontend_msg = ?FrontendMessageType::from_u8(msg_type),
+                "aaaa help"
+            );
+            return None;
+        }
+
+        let len = u32::from_be_bytes(
+            // TODO: what if this crosses packet boundaries? O.o
+            self.buf[0..4].try_into().expect("4 bytes read"),
+        );
+
+        if (len as usize) > self.buf.len() {
+            self.sniffer.unfinished_packet = Some(Packet {
+                msg_type,
+                contents: vec![Cow::Owned(self.buf.into())],
+            });
+            None
+        } else {
+            let contents = vec![Cow::Borrowed(&self.buf[..(len as _)])];
+            self.buf = &self.buf[(len as usize)..];
+            self.sniffer.next_msg = 0;
+            Some(Packet { msg_type, contents })
+        }
+    }
+}
+
+enum UnfinishedPacket {
+    OnlyType { msg_type: u8, len_bytes: Vec<u8> },
+    Packet(Packet<'static>),
+}
+
+#[derive(Debug)]
+struct MessageSniffer {
+    next_msg: u64,
+}
+
+impl MessageSniffer {
+    pub(crate) fn downstream() -> Self {
+        Self {
+            next_msg: u64::MAX,
+            unfinished_packet: None,
+        }
+    }
+
+    pub(crate) fn upstream() -> Self {
+        Self {
+            next_msg: 0,
+            unfinished_packet: None,
+        }
+    }
+
+    fn packets<'sniffer, 'buf>(&'sniffer mut self, buf: &'buf [u8]) -> Packets<'sniffer, 'buf> {
+        Packets { sniffer: self, buf }
+    }
+}
+
 async fn handle_client(mut downstream: TcpStream, upstream: &'static Upstream) -> Result<()> {
     let mut upstream = upstream.connection().await?;
 
     let mut upstream_buf = Box::new([0; BUFFER_SIZE]);
     let mut downstream_buf = Box::new([0; BUFFER_SIZE]);
+
+    let mut upstream_sniffer = MessageSniffer::upstream();
+    let mut downstream_sniffer = MessageSniffer::downstream();
     loop {
         match try_select(
             Box::pin(upstream.read(upstream_buf.as_mut())),
@@ -109,10 +243,20 @@ async fn handle_client(mut downstream: TcpStream, upstream: &'static Upstream) -
         .map_err(|e| e.factor_first().0)?
         {
             Either::Left((n, _)) if n > 0 => {
-                downstream.write_all(&upstream_buf[..n]).await?;
+                trace!(read_upstream_bytes = n);
+                let buf = &upstream_buf[..n];
+                for packet in upstream_sniffer.packets(buf) {
+                    trace!(backend_message = ?packet.backend_message_type());
+                }
+                downstream.write_all(buf).await?;
             }
             Either::Right((n, _)) if n > 0 => {
-                upstream.write_all(&downstream_buf[..n]).await?;
+                trace!(read_downstream_bytes = n);
+                let buf = &downstream_buf[..n];
+                for packet in downstream_sniffer.packets(buf) {
+                    trace!(frontend_message = ?packet.frontend_message_type());
+                }
+                upstream.write_all(buf).await?;
             }
             _ => {}
         }
