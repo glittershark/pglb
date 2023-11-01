@@ -224,39 +224,52 @@ impl MessageSniffer {
     }
 }
 
-async fn handle_client(mut downstream: TcpStream, upstream: &'static Upstream) -> Result<()> {
-    let mut upstream = upstream.connection().await?;
+#[derive(Debug)]
+struct Backend {
+    upstream_sniffer: MessageSniffer,
+    downstream_sniffer: MessageSniffer,
+}
 
-    let mut upstream_buf = Box::new([0; BUFFER_SIZE]);
-    let mut downstream_buf = Box::new([0; BUFFER_SIZE]);
+impl Backend {
+    fn new() -> Self {
+        Self {
+            upstream_sniffer: MessageSniffer::upstream(),
+            downstream_sniffer: MessageSniffer::downstream(),
+        }
+    }
 
-    let mut upstream_sniffer = MessageSniffer::upstream();
-    let mut downstream_sniffer = MessageSniffer::downstream();
-    loop {
-        match try_select(
-            Box::pin(upstream.read(upstream_buf.as_mut())),
-            Box::pin(downstream.read(downstream_buf.as_mut())),
-        )
-        .await
-        .map_err(|e| e.factor_first().0)?
-        {
-            Either::Left((n, _)) if n > 0 => {
-                trace!(read_upstream_bytes = n);
-                let buf = &upstream_buf[..n];
-                for packet in upstream_sniffer.packets(buf) {
-                    trace!(backend_message = ?packet.backend_message_type());
+    async fn run(mut self, mut downstream: TcpStream, upstream: &'static Upstream) -> Result<()> {
+        let mut upstream = upstream.connection().await?;
+
+        let mut upstream_buf = Box::new([0; BUFFER_SIZE]);
+        let mut downstream_buf = Box::new([0; BUFFER_SIZE]);
+
+        loop {
+            match try_select(
+                Box::pin(upstream.read(upstream_buf.as_mut())),
+                Box::pin(downstream.read(downstream_buf.as_mut())),
+            )
+            .await
+            .map_err(|e| e.factor_first().0)?
+            {
+                Either::Left((n, _)) if n > 0 => {
+                    trace!(read_upstream_bytes = n);
+                    let buf = &upstream_buf[..n];
+                    for packet in self.upstream_sniffer.packets(buf) {
+                        trace!(backend_message = ?packet.backend_message_type());
+                    }
+                    downstream.write_all(buf).await?;
                 }
-                downstream.write_all(buf).await?;
-            }
-            Either::Right((n, _)) if n > 0 => {
-                trace!(read_downstream_bytes = n);
-                let buf = &downstream_buf[..n];
-                for packet in downstream_sniffer.packets(buf) {
-                    trace!(frontend_message = ?packet.frontend_message_type());
+                Either::Right((n, _)) if n > 0 => {
+                    trace!(read_downstream_bytes = n);
+                    let buf = &downstream_buf[..n];
+                    for packet in self.downstream_sniffer.packets(buf) {
+                        trace!(frontend_message = ?packet.frontend_message_type());
+                    }
+                    upstream.write_all(buf).await?;
                 }
-                upstream.write_all(buf).await?;
+                _ => {}
             }
-            _ => {}
         }
     }
 }
@@ -284,7 +297,7 @@ pub async fn run(opts: Options) -> Result<()> {
         tokio::spawn(
             async move {
                 trace!("Accepted connection");
-                if let Err(error) = handle_client(socket, upstream).await {
+                if let Err(error) = Backend::new().run(socket, upstream).await {
                     error!(%error);
                 }
             }
