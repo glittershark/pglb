@@ -153,17 +153,24 @@ pub async fn run(opts: Options) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    use tracing_subscriber::prelude::*;
+
     color_eyre::install()?;
     let opts = Options::parse();
 
-    let s = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(&opts.log_level));
-    match opts.log_format {
-        LogFormat::Compact => s.compact().init(),
-        LogFormat::Full => s.init(),
-        LogFormat::Pretty => s.pretty().init(),
-        LogFormat::Json => s.json().with_current_span(true).init(),
-    }
+    let subscriber = tracing_subscriber::Registry::default()
+        .with(tracing_subscriber::EnvFilter::new(&opts.log_level))
+        .with({
+            let layer = tracing_subscriber::fmt::layer();
+            match opts.log_format {
+                LogFormat::Compact => layer.compact().boxed(),
+                LogFormat::Full => layer.boxed(),
+                LogFormat::Pretty => layer.pretty().boxed(),
+                LogFormat::Json => layer.json().with_current_span(true).boxed(),
+            }
+        })
+        .with(tracing_error::ErrorLayer::default());
+    tracing::subscriber::set_global_default(subscriber)?;
 
     run(opts).await
 }
